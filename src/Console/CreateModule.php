@@ -30,9 +30,16 @@ class CreateModule extends Command
         $this->generateFolders($moduleName, $modulePath);
         $this->generateFiles($moduleName, $modulePath);
 
+        // Asegurar autoload PSR-4 y registrar el provider del módulo
+        $this->ensureModulesPsr4Autoload();
+        $this->autoRegisterModuleProvider($moduleName);
+
         $this->info("Module {$moduleName} created successfully!");
     }
 
+    /**********************
+     * GENERACIÓN DE ARCHIVOS
+     **********************/
     protected function generateFolders(string $moduleName, string $modulePath): void
     {
         $folders = [
@@ -112,7 +119,7 @@ class CreateModule extends Command
             @unlink($origPath);
         }
 
-        // Ahora sí, generamos los artefactos que dependen de sus stubs “semilla”
+        // Artefactos que dependen de sus stubs “semilla”
         $this->generateModel($moduleName, $modulePath);
         $this->generateController($moduleName, $modulePath);
         $this->generateMigration($moduleName, $modulePath);
@@ -232,6 +239,128 @@ class CreateModule extends Command
         $requestFilePath = $modulePath . '/Http/Requests/Request.php';
         if (file_exists($requestFilePath)) {
             @unlink($requestFilePath);
+        }
+    }
+
+    /**********************
+     * AUTOMATIZACIONES
+     **********************/
+
+    /** Asegura "Modules\\" => "modules/" en composer.json y corre dump-autoload si hubo cambios */
+    protected function ensureModulesPsr4Autoload(): void
+    {
+        $composerPath = base_path('composer.json');
+        if (!file_exists($composerPath)) {
+            $this->warn('composer.json no encontrado. Omite autoload PSR-4.');
+            return;
+        }
+
+        $data = json_decode(file_get_contents($composerPath), true) ?: [];
+        $changed = false;
+
+        if (!isset($data['autoload']['psr-4'])) {
+            $data['autoload']['psr-4'] = [];
+            $changed = true;
+        }
+
+        if (!isset($data['autoload']['psr-4']['Modules\\'])) {
+            $data['autoload']['psr-4']['Modules\\'] = 'modules/';
+            $changed = true;
+        }
+
+        if ($changed) {
+            file_put_contents($composerPath, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+            $this->info('Added "Modules\\\\": "modules/" to composer.json (autoload.psr-4)');
+            $this->runComposerDumpAutoload();
+        }
+    }
+
+    /** Intenta ejecutar composer dump-autoload (Windows/Linux/Mac) */
+    protected function runComposerDumpAutoload(): void
+    {
+        $bin = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' ? 'composer.bat' : 'composer';
+        $cmd = $bin . ' dump-autoload';
+        try {
+            @exec($cmd . ' 2>&1', $output, $code);
+            if ($code === 0) {
+                $this->line(implode(PHP_EOL, $output));
+            } else {
+                $this->warn('No se pudo ejecutar "composer dump-autoload" automáticamente. Ejecútalo manualmente.');
+            }
+        } catch (\Throwable $e) {
+            $this->warn('No se pudo ejecutar "composer dump-autoload". Ejecútalo manualmente.');
+        }
+    }
+
+    /** Registra el provider del módulo en bootstrap/providers.php (L11/L12) o config/app.php (L10) */
+    protected function autoRegisterModuleProvider(string $moduleName): void
+    {
+        $fqcn = "Modules\\{$moduleName}\\Providers\\{$moduleName}ServiceProvider";
+
+        // Detecta versión mayor de Laravel
+        $ver = app()->version();           // ej. "12.3.0"
+        $major = (int) strtok($ver, '.');  // 12
+
+        if ($major >= 11) {
+            $this->registerInBootstrapProviders($fqcn);
+        } else {
+            $this->registerInConfigApp($fqcn);
+        }
+    }
+
+    protected function registerInBootstrapProviders(string $fqcn): void
+    {
+        $file = base_path('bootstrap/providers.php');
+        if (!file_exists($file)) {
+            $this->warn('bootstrap/providers.php no existe; omitiendo registro automático.');
+            return;
+        }
+
+        $contents = file_get_contents($file);
+
+        // Ya está registrado?
+        if (str_contains($contents, $fqcn . '::class')) {
+            $this->line("Provider ya estaba en bootstrap/providers.php: {$fqcn}");
+            return;
+        }
+
+        // providers.php retorna un array. Insertar línea antes del cierre '];'
+        $newLine = '    ' . $fqcn . '::class,' . PHP_EOL;
+        $updated = preg_replace('/\]\s*;\s*$/m', $newLine . '];', $contents, 1);
+
+        if ($updated && $updated !== $contents) {
+            file_put_contents($file, $updated);
+            $this->info("Provider registrado en bootstrap/providers.php: {$fqcn}");
+        } else {
+            $this->warn('No se pudo editar bootstrap/providers.php automáticamente. Agrega el provider manualmente.');
+        }
+    }
+
+    protected function registerInConfigApp(string $fqcn): void
+    {
+        $file = config_path('app.php');
+        if (!file_exists($file)) {
+            $this->warn('config/app.php no existe; omitiendo registro automático.');
+            return;
+        }
+
+        $contents = file_get_contents($file);
+
+        // Ya está?
+        if (str_contains($contents, $fqcn . '::class')) {
+            $this->line("Provider ya estaba en config/app.php: {$fqcn}");
+            return;
+        }
+
+        // Buscar el array 'providers' y añadir el FQCN antes del cierre.
+        $pattern = '/(\'providers\'\s*=>\s*\[)(.*?)(\n\s*\],)/s';
+        if (preg_match($pattern, $contents, $m, PREG_OFFSET_CAPTURE)) {
+            $insertion = $m[2][0] . PHP_EOL . '        ' . $fqcn . '::class,';
+            $updated = substr_replace($contents, $insertion, $m[2][1], strlen($m[2][0]));
+            file_put_contents($file, $updated);
+            $this->info("Provider registrado en config/app.php: {$fqcn}");
+        } else {
+            $this->warn('No se pudo localizar el array providers en config/app.php. Agrega el provider manualmente.');
         }
     }
 }
