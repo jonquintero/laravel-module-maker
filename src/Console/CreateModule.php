@@ -16,7 +16,6 @@ class CreateModule extends Command
     {
         $moduleName = $this->argument('name');
 
-        // Ruta destino configurable (config/module-maker.php)
         $modulesRoot = config('module-maker.modules_path', base_path('modules'));
         $modulePath  = rtrim($modulesRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $moduleName;
 
@@ -30,16 +29,15 @@ class CreateModule extends Command
         $this->generateFolders($moduleName, $modulePath);
         $this->generateFiles($moduleName, $modulePath);
 
-        // Asegurar autoload PSR-4 y registrar el provider del módulo
+        // Autoload PSR-4 y registro del provider del módulo
         $this->ensureModulesPsr4Autoload();
         $this->autoRegisterModuleProvider($moduleName);
 
         $this->info("Module {$moduleName} created successfully!");
     }
 
-    /**********************
-     * GENERACIÓN DE ARCHIVOS
-     **********************/
+    /* ==================== GENERACIÓN ==================== */
+
     protected function generateFolders(string $moduleName, string $modulePath): void
     {
         $folders = [
@@ -63,13 +61,10 @@ class CreateModule extends Command
 
     protected function resolveStubsPath(): string
     {
-        // 1) Si el proyecto publicó stubs, úsalos
         $published = config('module-maker.stubs_path', base_path('stubs/vendor/module-maker/module'));
         if (File::isDirectory($published)) {
             return $published;
         }
-
-        // 2) Fallback: usa los stubs internos del paquete (src/stubs/module)
         return __DIR__ . '/../stubs/module';
     }
 
@@ -80,46 +75,60 @@ class CreateModule extends Command
         // Copiamos todos los stubs al destino
         File::copyDirectory($stubPath, $modulePath);
 
-        // Estos stubs "semilla" NO se renombran aquí, porque luego
-        // generateModel/Controller/Migration/Request crean sus archivos definitivos.
-        $skipRename = [
+        // Stubs "semilla" que NO deben quedar en el módulo
+        $seedStubs = [
             'Models' . DIRECTORY_SEPARATOR . 'modelName.php.stub',
             'Http' . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'controllerName.php.stub',
             'Database' . DIRECTORY_SEPARATOR . 'Migrations' . DIRECTORY_SEPARATOR . 'migration.php.stub',
             'Http' . DIRECTORY_SEPARATOR . 'Requests' . DIRECTORY_SEPARATOR . 'Request.php.stub',
         ];
 
+        // Eliminamos del módulo los stubs semilla copiados (los usaremos desde el paquete)
+        foreach ($seedStubs as $rel) {
+            $p = $modulePath . DIRECTORY_SEPARATOR . $rel;
+            if (is_file($p)) {
+                @unlink($p);
+            }
+        }
+
+        // Procesar el resto de archivos (renombrar + reemplazar contenidos)
         $files = File::allFiles($modulePath);
 
         foreach ($files as $file) {
-            $rel = $file->getRelativePathname(); // con separadores nativos
-            $relNorm = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $rel);
-
-            // Saltar los stubs “semilla”
-            if (in_array($relNorm, $skipRename, true)) {
-                continue;
-            }
-
             $origPath = $file->getPathname();
+            $relDir   = $file->getRelativePath();
 
-            // Nuevo nombre de archivo: reemplazar {{moduleName}} y quitar .stub
-            $newFileName = str_replace(['{{moduleName}}', '.stub'], [$moduleName, ''], $file->getFilename());
-            $targetPath = $modulePath . DIRECTORY_SEPARATOR . $file->getRelativePath() . DIRECTORY_SEPARATOR . $newFileName;
+            $fileName = $file->getFilename();
 
-            // Reemplazo de contenido
-            $contents = file_get_contents($origPath);
-            if (is_string($contents)) {
-                $contents = str_replace('{{moduleName}}', $moduleName, $contents);
+            // Regla especial: resourceName -> {Module}Resource
+            if (str_contains($fileName, 'resourceName')) {
+                $newFileName = str_replace(
+                    ['resourceName', '.stub'],
+                    [$moduleName . 'Resource', ''],
+                    $fileName
+                );
             } else {
-                $contents = '';
+                // Reemplazo genérico de nombre
+                $newFileName = str_replace(['{{moduleName}}', '.stub'], [$moduleName, ''], $fileName);
             }
 
-            // Escribir destino de forma segura (evita locks en Windows) y borrar el original
+            $targetPath = $modulePath . DIRECTORY_SEPARATOR . $relDir . DIRECTORY_SEPARATOR . $newFileName;
+
+            // Contenido con placeholders reemplazados
+            $contents = file_get_contents($origPath);
+            if (!is_string($contents)) {
+                $contents = '';
+            } else {
+                $contents = str_replace('{{moduleName}}', $moduleName, $contents);
+                // Por si acaso usaste 'resourceName' dentro del código del stub:
+                $contents = str_replace('resourceName', $moduleName.'Resource', $contents);
+            }
+
             $this->safeReplaceFile($targetPath, $contents);
             @unlink($origPath);
         }
 
-        // Artefactos que dependen de sus stubs “semilla”
+        // Generar artefactos desde stubs semilla del paquete (no los copiados)
         $this->generateModel($moduleName, $modulePath);
         $this->generateController($moduleName, $modulePath);
         $this->generateMigration($moduleName, $modulePath);
@@ -133,7 +142,6 @@ class CreateModule extends Command
             @mkdir($dir, 0755, true);
         }
 
-        // Si existe destino, intentar borrarlo (con reintento) por si hay locks en Windows
         for ($i = 0; $i < $retries; $i++) {
             if (!file_exists($targetPath) || @unlink($targetPath)) {
                 break;
@@ -141,7 +149,6 @@ class CreateModule extends Command
             usleep($sleepMs * 1000);
         }
 
-        // Escribir a archivo temporal y luego renombrar (atomic-ish)
         $tmp = $targetPath . '.tmp' . bin2hex(random_bytes(4));
         file_put_contents($tmp, $contents);
 
@@ -152,7 +159,6 @@ class CreateModule extends Command
             usleep($sleepMs * 1000);
         }
 
-        // Último intento: copiar y borrar tmp
         @copy($tmp, $targetPath);
         @unlink($tmp);
     }
@@ -160,93 +166,54 @@ class CreateModule extends Command
     protected function generateModel(string $moduleName, string $modulePath): void
     {
         $modelName = ucfirst($moduleName);
-
-        $modelStubPath = $this->resolveStubsPath() . '/Models/modelName.php.stub';
-        $modelStubContent = file_get_contents($modelStubPath);
-        $modelContent = str_replace('{{modelName}}', $modelName, $modelStubContent);
-        $modelContent = str_replace('{{moduleName}}', $moduleName, $modelContent);
-
-        $modelPath = $modulePath . '/Models/' . $modelName . '.php';
-        file_put_contents($modelPath, $modelContent);
-
-        // Limpieza por si el stub quedó copiado
-        $extraModelPath = $modulePath . '/Models/modelName.php';
-        if (file_exists($extraModelPath)) {
-            @unlink($extraModelPath);
+        $stub = $this->resolveStubsPath() . '/Models/modelName.php.stub';
+        if (is_file($stub)) {
+            $content = file_get_contents($stub);
+            $content = str_replace(['{{modelName}}', '{{moduleName}}'], [$modelName, $moduleName], $content);
+            file_put_contents($modulePath . '/Models/' . $modelName . '.php', $content);
         }
     }
 
     protected function generateController(string $moduleName, string $modulePath): void
     {
         $controllerName = ucfirst($moduleName) . 'Controller';
-
-        $controllerStubPath = $this->resolveStubsPath() . '/Http/Controllers/controllerName.php.stub';
-        $controllerStubContent = file_get_contents($controllerStubPath);
-        $controllerContent = str_replace('{{controllerName}}', $controllerName, $controllerStubContent);
-        $controllerContent = str_replace('{{moduleName}}', $moduleName, $controllerContent);
-
-        $controllerPath = $modulePath . '/Http/Controllers/' . $controllerName . '.php';
-        file_put_contents($controllerPath, $controllerContent);
-
-        // Limpieza por si el stub quedó copiado
-        $extraControllerPath = $modulePath . '/Http/Controllers/controllerName.php';
-        if (file_exists($extraControllerPath)) {
-            @unlink($extraControllerPath);
+        $stub = $this->resolveStubsPath() . '/Http/Controllers/controllerName.php.stub';
+        if (is_file($stub)) {
+            $content = file_get_contents($stub);
+            $content = str_replace(['{{controllerName}}', '{{moduleName}}'], [$controllerName, $moduleName], $content);
+            file_put_contents($modulePath . '/Http/Controllers/' . $controllerName . '.php', $content);
         }
     }
 
     protected function generateMigration(string $moduleName, string $modulePath): void
     {
         $singularName = Str::snake($moduleName);
-        $inflector = InflectorFactory::create()->build();
-        $pluralName = $inflector->pluralize($singularName);
+        $pluralName = InflectorFactory::create()->build()->pluralize($singularName);
         $migrationName = 'create_' . $pluralName . '_table';
 
-        $migrationStubPath = $this->resolveStubsPath() . '/Database/Migrations/migration.php.stub';
-        $migrationStubContent = file_get_contents($migrationStubPath);
-
-        $timestamp = date('Y_m_d_His');
-        $migrationFileName = $timestamp . '_' . $migrationName . '.php';
-
-        $migrationContent = str_replace(
-            ['{{migrationName}}', '{{table}}'],
-            [$migrationName, $pluralName],
-            $migrationStubContent
-        );
-
-        $migrationPath = $modulePath . '/Database/Migrations/' . $migrationFileName;
-        file_put_contents($migrationPath, $migrationContent);
-
-        // Limpieza por si el stub quedó copiado
-        $extraMigrationPath = $modulePath . '/Database/Migrations/migration.php';
-        if (file_exists($extraMigrationPath)) {
-            @unlink($extraMigrationPath);
+        $stub = $this->resolveStubsPath() . '/Database/Migrations/migration.php.stub';
+        if (is_file($stub)) {
+            $timestamp = date('Y_m_d_His');
+            $file = $timestamp . '_' . $migrationName . '.php';
+            $content = file_get_contents($stub);
+            $content = str_replace(['{{migrationName}}', '{{table}}'], [$migrationName, $pluralName], $content);
+            file_put_contents($modulePath . '/Database/Migrations/' . $file, $content);
         }
     }
 
     protected function generateFormRequest(string $moduleName, string $modulePath): void
     {
         $requestName = ucfirst($moduleName) . 'Request';
-
-        $requestStubPath = $this->resolveStubsPath() . '/Http/Requests/Request.php.stub';
-        $requestStubContent = file_get_contents($requestStubPath);
-        $requestContent = str_replace(['{{moduleName}}', '{{requestName}}'], [$moduleName, $requestName], $requestStubContent);
-
-        $requestPath = $modulePath . '/Http/Requests/' . $requestName . '.php';
-        file_put_contents($requestPath, $requestContent);
-
-        // Limpieza por si el stub quedó copiado
-        $requestFilePath = $modulePath . '/Http/Requests/Request.php';
-        if (file_exists($requestFilePath)) {
-            @unlink($requestFilePath);
+        $stub = $this->resolveStubsPath() . '/Http/Requests/Request.php.stub';
+        if (is_file($stub)) {
+            $content = file_get_contents($stub);
+            $content = str_replace(['{{moduleName}}', '{{requestName}}'], [$moduleName, $requestName], $content);
+            file_put_contents($modulePath . '/Http/Requests/' . $requestName . '.php', $content);
         }
     }
 
-    /**********************
-     * AUTOMATIZACIONES
-     **********************/
+    /* ==================== AUTOMATIZACIONES ==================== */
 
-    /** Asegura "Modules\\" => "modules/" en composer.json y corre dump-autoload si hubo cambios */
     protected function ensureModulesPsr4Autoload(): void
     {
         $composerPath = base_path('composer.json');
@@ -258,10 +225,8 @@ class CreateModule extends Command
         $data = json_decode(file_get_contents($composerPath), true) ?: [];
         $changed = false;
 
-        if (!isset($data['autoload']['psr-4'])) {
-            $data['autoload']['psr-4'] = [];
-            $changed = true;
-        }
+        $data['autoload'] = $data['autoload'] ?? [];
+        $data['autoload']['psr-4'] = $data['autoload']['psr-4'] ?? [];
 
         if (!isset($data['autoload']['psr-4']['Modules\\'])) {
             $data['autoload']['psr-4']['Modules\\'] = 'modules/';
@@ -275,31 +240,19 @@ class CreateModule extends Command
         }
     }
 
-    /** Intenta ejecutar composer dump-autoload (Windows/Linux/Mac) */
     protected function runComposerDumpAutoload(): void
     {
         $bin = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' ? 'composer.bat' : 'composer';
-        $cmd = $bin . ' dump-autoload';
-        try {
-            @exec($cmd . ' 2>&1', $output, $code);
-            if ($code === 0) {
-                $this->line(implode(PHP_EOL, $output));
-            } else {
-                $this->warn('No se pudo ejecutar "composer dump-autoload" automáticamente. Ejecútalo manualmente.');
-            }
-        } catch (\Throwable $e) {
-            $this->warn('No se pudo ejecutar "composer dump-autoload". Ejecútalo manualmente.');
+        @exec($bin . ' dump-autoload 2>&1', $out, $code);
+        if ($code !== 0) {
+            $this->warn('No se pudo ejecutar "composer dump-autoload" automáticamente. Ejecútalo manualmente.');
         }
     }
 
-    /** Registra el provider del módulo en bootstrap/providers.php (L11/L12) o config/app.php (L10) */
     protected function autoRegisterModuleProvider(string $moduleName): void
     {
         $fqcn = "Modules\\{$moduleName}\\Providers\\{$moduleName}ServiceProvider";
-
-        // Detecta versión mayor de Laravel
-        $ver = app()->version();           // ej. "12.3.0"
-        $major = (int) strtok($ver, '.');  // 12
+        $major = (int) strtok(app()->version(), '.');
 
         if ($major >= 11) {
             $this->registerInBootstrapProviders($fqcn);
@@ -317,17 +270,13 @@ class CreateModule extends Command
         }
 
         $contents = file_get_contents($file);
-
-        // Ya está registrado?
         if (str_contains($contents, $fqcn . '::class')) {
             $this->line("Provider ya estaba en bootstrap/providers.php: {$fqcn}");
             return;
         }
 
-        // providers.php retorna un array. Insertar línea antes del cierre '];'
         $newLine = '    ' . $fqcn . '::class,' . PHP_EOL;
         $updated = preg_replace('/\]\s*;\s*$/m', $newLine . '];', $contents, 1);
-
         if ($updated && $updated !== $contents) {
             file_put_contents($file, $updated);
             $this->info("Provider registrado en bootstrap/providers.php: {$fqcn}");
@@ -345,14 +294,11 @@ class CreateModule extends Command
         }
 
         $contents = file_get_contents($file);
-
-        // Ya está?
         if (str_contains($contents, $fqcn . '::class')) {
             $this->line("Provider ya estaba en config/app.php: {$fqcn}");
             return;
         }
 
-        // Buscar el array 'providers' y añadir el FQCN antes del cierre.
         $pattern = '/(\'providers\'\s*=>\s*\[)(.*?)(\n\s*\],)/s';
         if (preg_match($pattern, $contents, $m, PREG_OFFSET_CAPTURE)) {
             $insertion = $m[2][0] . PHP_EOL . '        ' . $fqcn . '::class,';
