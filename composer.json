@@ -3,7 +3,25 @@
   "description": "Artisan command to scaffold Laravel modules from custom stubs.",
   "type": "library",
   "license": "MIT",
-  "version": "0.1.0",
+  "keywords": [
+    "laravel",
+    "modules",
+    "scaffold",
+    "stubs",
+    "generator",
+    "artisan"
+  ],
+  "homepage": "https://github.com/jonquintero/laravel-module-maker",
+  "support": {
+    "issues": "https://github.com/jonquintero/laravel-module-maker/issues",
+    "source": "https://github.com/jonquintero/laravel-module-maker"
+  },
+  "authors": [
+    {
+      "name": "Jonathan Quintero",
+      "email": "jonquintero@hotmail.com"
+    }
+  ],
   "autoload": {
     "psr-4": {
       "Jonquintero\\ModuleMaker\\": "src/"
@@ -19,8 +37,15 @@
   "require": {
     "php": "^8.1",
     "illuminate/support": "^10.0|^11.0|^12.0",
+    "illuminate/filesystem": "^10.0|^11.0|^12.0",
     "doctrine/inflector": "^2.0"
   },
+  "require-dev": {
+    "orchestra/testbench": "^8.0|^9.0|^10.0"
+  },
   "minimum-stability": "stable",
-  "prefer-stable": true
+  "prefer-stable": true,
+  "config": {
+    "sort-packages": true
+  }
 }
